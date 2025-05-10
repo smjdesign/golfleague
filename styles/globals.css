@@ -1,0 +1,364 @@
+// File: styles/globals.css
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --primary-color: #3E8E41; /* golf green */
+  --secondary-color: #F5F5DC; /* beige/grass contrast */
+  --accent-color: #D4AF37; /* gold highlights */
+}
+
+body {
+  @apply bg-beige-50 text-gray-800;
+  font-family: 'Inter', sans-serif;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: 'Playfair Display', serif;
+}
+
+/* Custom color classes */
+.bg-gold-400 {
+  background-color: var(--accent-color);
+}
+
+.text-gold-400 {
+  color: var(--accent-color);
+}
+
+.bg-beige-50 {
+  background-color: var(--secondary-color);
+}
+
+/* Custom utilities */
+.transition-colors {
+  transition-property: background-color, border-color, color, fill, stroke;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  transition-duration: 150ms;
+}
+
+/* Scorecards */
+.scorecard {
+  @apply bg-white rounded-lg shadow-md p-4;
+  border-top: 4px solid var(--primary-color);
+}
+
+.scorecard-header {
+  @apply text-xl font-serif text-green-800 mb-2;
+}
+
+.scorecard-body {
+  @apply text-gray-700;
+}
+
+// File: tailwind.config.js
+module.exports = {
+  content: [
+    "./pages/**/*.{js,ts,jsx,tsx}",
+    "./components/**/*.{js,ts,jsx,tsx}",
+  ],
+  theme: {
+    extend: {
+      colors: {
+        green: {
+          50: '#f0f9f1',
+          100: '#dcf1de',
+          200: '#bae3bd',
+          300: '#8ecc92',
+          400: '#5fb266',
+          500: '#3E8E41', // primary
+          600: '#2c7434',
+          700: '#25612d',
+          800: '#1f4a25',
+          900: '#1a3c20',
+        },
+        gold: {
+          400: '#D4AF37', // accent
+        },
+        beige: {
+          50: '#F5F5DC', // secondary
+        },
+      },
+      fontFamily: {
+        sans: ['Inter', 'sans-serif'],
+        serif: ['Playfair Display', 'serif'],
+      },
+    },
+  },
+  plugins: [],
+};
+
+// File: pages/api/auth/[...supabase].js
+import { createMiddlewareSupabaseClient } from '@supabase/auth-helpers-nextjs';
+import { NextResponse } from 'next/server';
+
+export async function middleware(req) {
+  const res = NextResponse.next();
+  const supabase = createMiddlewareSupabaseClient({ req, res });
+  
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+
+  // If the user is not signed in and the route is protected, redirect to login
+  if (!session && req.nextUrl.pathname.startsWith('/admin')) {
+    const redirectUrl = req.nextUrl.clone();
+    redirectUrl.pathname = '/login';
+    return NextResponse.redirect(redirectUrl);
+  }
+
+  return res;
+}
+
+// File: database/models.sql
+-- Teams Table
+CREATE TABLE teams (
+  id SERIAL PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  logo_url TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Players Table
+CREATE TABLE players (
+  id SERIAL PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  email VARCHAR(255) UNIQUE,
+  team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL,
+  handicap FLOAT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Courses Table
+CREATE TABLE courses (
+  id SERIAL PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  location VARCHAR(255),
+  par INTEGER,
+  holes INTEGER,
+  image_url TEXT,
+  difficulty VARCHAR(50),
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Tournaments Table
+CREATE TABLE tournaments (
+  id SERIAL PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  course_id INTEGER REFERENCES courses(id) ON DELETE CASCADE,
+  date DATE,
+  completed BOOLEAN DEFAULT false,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Scores Table
+CREATE TABLE scores (
+  id SERIAL PRIMARY KEY,
+  tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE,
+  player_id INTEGER REFERENCES players(id) ON DELETE CASCADE,
+  strokes INTEGER,
+  hole_number INTEGER,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (tournament_id, player_id, hole_number)
+);
+
+-- Create a function to calculate standings
+CREATE OR REPLACE FUNCTION get_standings(filter_type TEXT)
+RETURNS TABLE (
+  id INTEGER,
+  team VARCHAR(255),
+  played INTEGER,
+  wins INTEGER,
+  losses INTEGER,
+  points INTEGER,
+  avg_score FLOAT
+) AS $$
+BEGIN
+  IF filter_type = 'team' THEN
+    RETURN QUERY
+    SELECT 
+      t.id,
+      t.name AS team,
+      COUNT(DISTINCT s.tournament_id) AS played,
+      SUM(CASE WHEN s.strokes < course_avg.avg_strokes THEN 1 ELSE 0 END)::INTEGER AS wins,
+      SUM(CASE WHEN s.strokes >= course_avg.avg_strokes THEN 1 ELSE 0 END)::INTEGER AS losses,
+      SUM(CASE WHEN s.strokes < course_avg.avg_strokes THEN 3 ELSE 1 END)::INTEGER AS points,
+      AVG(s.strokes)::FLOAT AS avg_score
+    FROM teams t
+    JOIN players p ON p.team_id = t.id
+    JOIN scores s ON s.player_id = p.id
+    JOIN tournaments trn ON s.tournament_id = trn.id
+    JOIN (
+      SELECT tournament_id, AVG(strokes) AS avg_strokes
+      FROM scores
+      GROUP BY tournament_id
+    ) course_avg ON s.tournament_id = course_avg.tournament_id
+    GROUP BY t.id, t.name
+    ORDER BY points DESC, wins DESC;
+  ELSE
+    RETURN QUERY
+    SELECT 
+      p.id,
+      p.name AS team,
+      COUNT(DISTINCT s.tournament_id) AS played,
+      SUM(CASE WHEN s.strokes < course_avg.avg_strokes THEN 1 ELSE 0 END)::INTEGER AS wins,
+      SUM(CASE WHEN s.strokes >= course_avg.avg_strokes THEN 1 ELSE 0 END)::INTEGER AS losses,
+      SUM(CASE WHEN s.strokes < course_avg.avg_strokes THEN 3 ELSE 1 END)::INTEGER AS points,
+      AVG(s.strokes)::FLOAT AS avg_score
+    FROM players p
+    JOIN scores s ON s.player_id = p.id
+    JOIN tournaments trn ON s.tournament_id = trn.id
+    JOIN (
+      SELECT tournament_id, AVG(strokes) AS avg_strokes
+      FROM scores
+      GROUP BY tournament_id
+    ) course_avg ON s.tournament_id = course_avg.tournament_id
+    GROUP BY p.id, p.name
+    ORDER BY points DESC, wins DESC;
+  END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- File: pages/api/seed.js
+// This file would be used to seed the database with initial data
+// Not included in the final production app
+
+import { supabase } from '../../lib/supabaseClient';
+
+export default async function handler(req, res) {
+  if (req.method !== 'POST') {
+    return res.status(405).json({ message: 'Method not allowed' });
+  }
+
+  const { secret } = req.body;
+  
+  // Check for a secret key to prevent unauthorized seeding
+  if (secret !== process.env.SEED_SECRET_KEY) {
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
+
+  try {
+    // Seed Teams
+    const teams = [
+      { name: 'Eagle Squadron', logo_url: '/logos/team1.png' },
+      { name: 'Birdie Bandits', logo_url: '/logos/team2.png' },
+      { name: 'Fairway Legends', logo_url: '/logos/team3.png' },
+      { name: 'Par Breakers', logo_url: '/logos/team4.png' },
+      { name: 'Bunker Busters', logo_url: '/logos/team5.png' },
+      { name: 'Bogey Brigade', logo_url: '/logos/team6.png' },
+    ];
+
+    const { error: teamsError } = await supabase.from('teams').insert(teams);
+    if (teamsError) throw teamsError;
+
+    // Seed Courses
+    const courses = [
+      { name: 'Pine Valley Golf Club', location: 'Pine Valley, NJ', par: 72, holes: 18, image_url: '/courses/course1.jpg', difficulty: 'Hard' },
+      { name: 'Augusta National', location: 'Augusta, GA', par: 72, holes: 18, image_url: '/courses/course2.jpg', difficulty: 'Hard' },
+      { name: 'Pebble Beach Golf Links', location: 'Pebble Beach, CA', par: 72, holes: 18, image_url: '/courses/course3.jpg', difficulty: 'Medium' },
+      { name: 'St Andrews Links', location: 'St Andrews, Scotland', par: 72, holes: 18, image_url: '/courses/course4.jpg', difficulty: 'Medium' },
+    ];
+
+    const { error: coursesError } = await supabase.from('courses').insert(courses);
+    if (coursesError) throw coursesError;
+
+    // Get the inserted teams and courses to use their IDs
+    const { data: teamsData } = await supabase.from('teams').select('id');
+    const { data: coursesData } = await supabase.from('courses').select('id');
+
+    // Seed Players (3-5 per team)
+    const players = [];
+    teamsData.forEach(team => {
+      const playerCount = Math.floor(Math.random() * 3) + 3; // 3-5 players
+      
+      for (let i = 0; i < playerCount; i++) {
+        players.push({
+          name: `Player ${team.id}-${i + 1}`,
+          email: `player${team.id}${i + 1}@example.com`,
+          team_id: team.id,
+          handicap: Math.floor(Math.random() * 20) + 1,
+        });
+      }
+    });
+
+    const { error: playersError } = await supabase.from('players').insert(players);
+    if (playersError) throw playersError;
+
+    // Seed Tournaments (2 past, 2 upcoming)
+    const today = new Date();
+    const tournaments = [
+      { 
+        name: 'Spring Championship', 
+        course_id: coursesData[0].id,
+        date: new Date(today.getFullYear(), today.getMonth() + 1, 15).toISOString().split('T')[0], 
+        completed: false
+      },
+      { 
+        name: 'Summer Classic', 
+        course_id: coursesData[1].id,
+        date: new Date(today.getFullYear(), today.getMonth() + 2, 10).toISOString().split('T')[0], 
+        completed: false
+      },
+      { 
+        name: 'Fall Invitational', 
+        course_id: coursesData[2].id,
+        date: new Date(today.getFullYear(), today.getMonth() - 1, 5).toISOString().split('T')[0], 
+        completed: true
+      },
+      { 
+        name: 'Winter Open', 
+        course_id: coursesData[3].id,
+        date: new Date(today.getFullYear(), today.getMonth() - 2, 20).toISOString().split('T')[0], 
+        completed: true
+      },
+    ];
+
+    const { error: tournamentsError } = await supabase.from('tournaments').insert(tournaments);
+    if (tournamentsError) throw tournamentsError;
+
+    // Get inserted tournaments and players to add scores
+    const { data: tournamentsData } = await supabase.from('tournaments').select('id, completed');
+    const { data: playersData } = await supabase.from('players').select('id');
+
+    // Add scores for completed tournaments
+    const scores = [];
+    
+    tournamentsData.forEach(tournament => {
+      if (tournament.completed) {
+        playersData.forEach(player => {
+          for (let hole = 1; hole <= 18; hole++) {
+            // Random score between par-1 and par+3
+            const strokes = Math.floor(Math.random() * 5) + 3;
+            
+            scores.push({
+              tournament_id: tournament.id,
+              player_id: player.id,
+              hole_number: hole,
+              strokes: strokes
+            });
+          }
+        });
+      }
+    });
+
+    const { error: scoresError } = await supabase.from('scores').insert(scores);
+    if (scoresError) throw scoresError;
+
+    res.status(200).json({ message: 'Database seeded successfully' });
+  } catch (error) {
+    console.error('Error seeding database:', error);
+    res.status(500).json({ message: 'Error seeding database', error: error.message });
+  }
+}
+
+// File: next.config.js
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  reactStrictMode: true,
+  images: {
+    domains: ['localhost', 'your-supabase-project.supabase.co'],
+  },
+}
+
+module.exports = nextConfig
